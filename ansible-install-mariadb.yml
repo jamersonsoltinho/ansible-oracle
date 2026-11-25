@@ -1,0 +1,58 @@
+---
+- name: Install MariaDB on Ubuntu 20.04 (OCI)
+  hosts: all
+  become: yes
+  vars:
+    mariadb_root_password: "root"
+
+  tasks:
+    - name: Add MariaDB official repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://mirror.rackspace.com/mariadb/repo/11.6/ubuntu focal main"
+        state: present
+        update_cache: yes
+
+    - name: Import MariaDB GPG key
+      apt_key:
+        keyserver: keyserver.ubuntu.com
+        id: "0xF1656F24C74CD1D8"
+        state: present
+
+    - name: Install MariaDB server and client
+      apt:
+        name:
+          - mariadb-server
+          - mariadb-client
+        state: latest
+        update_cache: yes
+
+    - name: Start and enable MariaDB service
+      systemd:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Set MariaDB root password
+      mysql_user:
+        name: root
+        password: "{{ mariadb_root_password }}"
+        host_all: yes
+        check_implicit_admin: yes
+        state: present
+
+    - name: Remove anonymous users
+      mysql_user:
+        name: ''
+        host_all: yes
+        state: absent
+
+    - name: Disallow root login remotely (keep only localhost for security)
+      mysql_user:
+        name: root
+        host: "%"
+        state: absent
+
+    - name: Remove test database
+      mysql_db:
+        name: test
+        state: absent
