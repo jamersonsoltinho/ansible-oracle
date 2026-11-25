@@ -1,3 +1,4 @@
+
 ---
 - name: Install MariaDB on Ubuntu 20.04 (OCI)
   hosts: all
@@ -6,83 +7,135 @@
 
   vars:
     mariadb_root_password: "root"
-    mariadb_repository: "https://mirror.rackspace.com/mariadb/repo/11.6/ubuntu"
-    mariadb_gpg_key: "https://mariadb.org/mariadb_release_signing_key.asc"
+    mariadb_version: "10.6"
+    mariadb_repository: "https://mirror.realcompute.io/mariadb/repo/10.6/ubuntu"
+    mariadb_gpg_key: "https://mariadb.org/mariadb_release_signing_key.pgp"
 
   tasks:
+
+    # Remove the previous invalid repository before updating APT
+    - name: Remove previous MariaDB repository configuration
+      ansible.builtin.raw: |
+        rm -f /etc/apt/sources.list.d/mariadb.list
+        rm -f /etc/apt/sources.list.d/mariadb.sources
+      changed_when: false
+
+    # Install dependencies without using remote Python
     - name: Install required packages
       ansible.builtin.raw: |
+        set -e
         apt-get update
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
           ca-certificates curl gnupg
       changed_when: false
 
+    # Configure MariaDB repository
     - name: Configure MariaDB repository and GPG key
       ansible.builtin.raw: |
         set -e
 
-        KEY_FILE=/usr/share/keyrings/mariadb-archive-keyring.gpg
+        KEY_FILE=/etc/apt/keyrings/mariadb-keyring.asc
         REPO_FILE=/etc/apt/sources.list.d/mariadb.list
+        ARCH=$(dpkg --print-architecture)
 
-        curl -fsSL "{{ mariadb_gpg_key }}" | \
-          gpg --dearmor --yes -o "$KEY_FILE"
+        mkdir -p /etc/apt/keyrings
 
-        echo "deb [arch=amd64 signed-by=$KEY_FILE] {{ mariadb_repository }} focal main" \
+        curl -fsSL "{{ mariadb_gpg_key }}" -o "$KEY_FILE"
+
+        chmod 644 "$KEY_FILE"
+
+        echo "deb [arch=${ARCH} signed-by=${KEY_FILE}] {{ mariadb_repository }} focal main" \
           > "$REPO_FILE"
 
         apt-get update
-      register: repository_result
-      changed_when: true
 
+    # Install MariaDB
     - name: Install MariaDB server and client
       ansible.builtin.raw: |
+        set -e
+
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
           mariadb-server mariadb-client
 
+    # Start MariaDB
     - name: Start and enable MariaDB service
       ansible.builtin.raw: |
+        set -e
+
         systemctl enable mariadb
         systemctl start mariadb
         systemctl is-active mariadb
 
+    # Configure root password
     - name: Set MariaDB root password
       ansible.builtin.raw: |
         set -e
 
-        if mariadb -uroot -e "SELECT 1" >/dev/null 2>&1; then
+        if mariadb --defaults-extra-file=/root/.my.cnf \
+          -e "SELECT 1" >/dev/null 2>&1; then
+          echo "MariaDB root password already configured"
+
+        elif mariadb -uroot -e "SELECT 1" >/dev/null 2>&1; then
+
           mariadb -uroot -e \
             "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mariadb_root_password }}';"
-        elif mariadb -uroot -p'{{ mariadb_root_password }}' \
-          -e "SELECT 1" >/dev/null 2>&1; then
-          echo "Root password already configured"
+
+          printf '[client]\nuser=root\npassword=%s\n' \
+            '{{ mariadb_root_password }}' > /root/.my.cnf
+
+          chmod 600 /root/.my.cnf
+
         else
           echo "Unable to authenticate as MariaDB root" >&2
           exit 1
         fi
       no_log: true
 
+    # Remove anonymous users
     - name: Remove anonymous users
       ansible.builtin.raw: |
-        mariadb -uroot -p'{{ mariadb_root_password }}' -e "
+        set -e
+
+        mariadb --defaults-extra-file=/root/.my.cnf -e "
           DELETE FROM mysql.global_priv
           WHERE User = '';
+
           FLUSH PRIVILEGES;
         "
       no_log: true
 
+    # Remove remote root access
     - name: Disallow root login remotely
       ansible.builtin.raw: |
-        mariadb -uroot -p'{{ mariadb_root_password }}' -e "
+        set -e
+
+        mariadb --defaults-extra-file=/root/.my.cnf -e "
           DELETE FROM mysql.global_priv
           WHERE User = 'root'
           AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+
           FLUSH PRIVILEGES;
         "
       no_log: true
 
+    # Remove test database
     - name: Remove test database
       ansible.builtin.raw: |
-        mariadb -uroot -p'{{ mariadb_root_password }}' -e "
+        set -e
+
+        mariadb --defaults-extra-file=/root/.my.cnf -e "
           DROP DATABASE IF EXISTS test;
         "
       no_log: true
+
+    # Validate installation
+    - name: Validate MariaDB installation
+      ansible.builtin.raw: |
+        mariadb --defaults-extra-file=/root/.my.cnf \
+          -e "SELECT VERSION();"
+      register: mariadb_version_result
+      changed_when: false
+
+    - name: Display installed MariaDB version
+      ansible.builtin.debug:
+        msg: "{{ mariadb_version_result.stdout }}"
